@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import random
 import tkinter as tk
 from dataclasses import dataclass
@@ -12,7 +11,7 @@ from PIL import Image, ImageSequence, ImageTk
 
 from .assets import AssetCatalog, STATE_LABELS
 from .countdown import CountdownPanel, EventCountdown
-from .question_bank import QuestionBankBridge
+from .question_bank import QuestionBankBridge, _write_json_atomic
 from .question_panel import QuestionCardPanel
 from .study import StudySession, format_duration
 from .journal import DailyJournal
@@ -128,6 +127,9 @@ class PetWindow:
         config = clean_retired_countdown(config)
         self.config = dict(config)
         self.config_path = config_path
+        self.config_save_error: str | None = None
+        self._config_error_notified = False
+        self._closed = False
         self.size = clamp_size(config.get("size", 260))
         self.opacity = float(config.get("opacity", 1.0))
         self.always_on_top = bool(config.get("always_on_top", True))
@@ -173,6 +175,9 @@ class PetWindow:
         data_dir = (config_path.parent if config_path is not None else Path.cwd()) / "data"
         self.question_bridge = QuestionBankBridge(data_dir)
         self.journal = DailyJournal(data_dir / "daily_journal.json")
+        if not self.question_bridge.available:
+            self.journal.read_only = True
+            self.journal.error = self.question_bridge.last_error
         self.calendar_panel: CalendarPanel | None = None
         self.study_recorded = False
         self.question_panel: QuestionCardPanel | None = None
@@ -312,6 +317,15 @@ class PetWindow:
 
     def attach_tray(self, tray: TrayController) -> None:
         self.tray = tray
+        self._notify_config_error()
+
+    def notify_storage_status(self) -> None:
+        """Call after starting the native tray, not while its icon is uninitialized."""
+        if self.tray is not None and (not self.question_bridge.available or self.journal.read_only):
+            self.tray.notify(
+                "学习数据暂不可写",
+                "桌宠可继续使用，但部分记录暂不可保存。请查看学习日历中的提示。",
+            )
 
     def show_pet(self) -> None:
         self.root.deiconify()
@@ -321,14 +335,15 @@ class PetWindow:
         self._update_event_countdown_panel()
 
     def hide_to_tray(self) -> None:
+        if self.calendar_panel is not None and self.calendar_panel.window.winfo_exists():
+            if not self.calendar_panel.hide():
+                return
         if self.countdown_panel is not None:
             self.countdown_panel.hide()
         if self.study_panel is not None and self.study_panel.winfo_exists():
             self.study_panel.withdraw()
         if self.question_panel is not None and self.question_panel.window.winfo_exists():
             self.question_panel.hide()
-        if self.calendar_panel is not None and self.calendar_panel.window.winfo_exists():
-            self.calendar_panel.hide()
         self.root.withdraw()
         self.hidden_to_tray = True
 
@@ -449,6 +464,13 @@ class PetWindow:
 
     def open_question_cards(self) -> None:
         self.show_pet()
+        if not self.question_bridge.available:
+            self.question_bridge.load_if_changed()
+            if not self.question_bridge.available:
+                messagebox.showwarning(
+                    "答题卡暂不可用", self.question_bridge.last_error, parent=self.root,
+                )
+                return
         bank = self.question_bridge.bank
         if bank is None:
             bank = self.question_bridge.load_if_changed()
@@ -834,12 +856,14 @@ class PetWindow:
         self._flush_journal()
         self._update_study_panel()
 
-    def _flush_journal(self) -> None:
+    def _flush_journal(self) -> bool:
         if not self.journal.read_only:
             try:
                 self.journal.save()
             except OSError as exc:
                 self.journal.error = f"学习记录保存失败：{exc}"
+                return False
+        return True
 
     def _stop_study(self) -> None:
         self._finish_study(False)
@@ -959,9 +983,17 @@ class PetWindow:
             self.set_state(random.choice(("wave", "work", "eat", "sleep")))
         self._schedule_random_action()
 
-    def _persist_config(self) -> None:
+    def _notify_config_error(self) -> None:
+        if self.config_save_error and self.tray is not None and not self._config_error_notified:
+            self.tray.notify(
+                "设置未能保存",
+                "本次更改暂时仅在当前运行中生效。请检查设置目录的写入权限。",
+            )
+            self._config_error_notified = True
+
+    def _persist_config(self) -> bool:
         if self.config_path is None:
-            return
+            return True
         self.config.update(
             {
                 "size": self.size,
@@ -974,22 +1006,40 @@ class PetWindow:
             }
         )
         try:
-            self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            self.config_path.write_text(
-                json.dumps(self.config, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-        except OSError:
-            # 配置保存失败不应导致桌宠退出。
-            pass
+            _write_json_atomic(self.config_path, self.config)
+        except OSError as exc:
+            self.config_save_error = f"设置未能保存：{exc}"
+            self._notify_config_error()
+            return False
+        self.config_save_error = None
+        self._config_error_notified = False
+        return True
 
-    def close(self) -> None:
+    def close(self) -> bool:
+        if self._closed:
+            return True
         if self.calendar_panel is not None and self.calendar_panel.window.winfo_exists():
-            if self.calendar_panel.dirty and not self.calendar_panel.save():
-                return
+            if not self.calendar_panel.prepare_to_close():
+                return False
+        errors = []
+        if not self._persist_config():
+            errors.append(self.config_save_error)
+        if not self._flush_journal():
+            errors.append(self.journal.error)
+        if self.question_bridge.bank is not None:
+            try:
+                self.question_bridge.save_state()
+            except OSError as exc:
+                errors.append(f"答题进度未能保存：{exc}")
+        if errors and not messagebox.askokcancel(
+            "部分更改尚未保存",
+            "\n".join(errors) + "\n\n仍然退出？未保存的更改将丢失，已有文件不会主动清空。",
+            parent=self.root, default=messagebox.CANCEL, icon=messagebox.WARNING,
+        ):
+            return False
+        self._closed = True
+        if self.calendar_panel is not None and self.calendar_panel.window.winfo_exists():
             self.calendar_panel.destroy()
-        self._flush_journal()
-        self._persist_config()
         if self.tray is not None:
             self.tray.stop()
         for job in (
@@ -1006,3 +1056,4 @@ class PetWindow:
                 except tk.TclError:
                     pass
         self.root.destroy()
+        return True

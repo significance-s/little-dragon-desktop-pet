@@ -19,7 +19,7 @@ APP_DIR = ROOT / "desktop_pet"
 BUILD_DIR = ROOT / "build"
 DIST_DIR = ROOT / "dist"
 APP_NAME = "LittleDragonPet"
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 
 
 def sha256(path: Path) -> str:

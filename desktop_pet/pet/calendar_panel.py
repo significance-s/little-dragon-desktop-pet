@@ -3,7 +3,7 @@ from __future__ import annotations
 import calendar
 from datetime import date
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 from .journal import DailyJournal
 from .study import format_duration
@@ -118,14 +118,23 @@ class CalendarPanel:
 
         footer = tk.Frame(self.window, background=BG)
         footer.grid(row=4, column=0, sticky="ew", padx=18, pady=(10, 14))
-        self.save_button = self._button(footer, "保存复盘", self.save)
+        footer.columnconfigure(0, weight=1)
+        controls = tk.Frame(footer, background=BG)
+        controls.grid(row=0, column=0, sticky="w")
+        self.save_button = self._button(controls, "保存复盘", self.save)
         self.save_button.pack(side="left")
-        self.copy_button = self._button(footer, "复制当日小结", self.copy_summary)
+        self.copy_button = self._button(controls, "复制当日小结", self.copy_summary)
         self.copy_button.pack(side="left", padx=8)
+        recovery = tk.Frame(footer, background=BG)
+        recovery.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.copy_draft_button = self._button(recovery, "复制未保存草稿", self.copy_draft)
+        self.copy_draft_button.pack(side="left")
+        self.discard_button = self._button(recovery, "放弃更改…", self.discard_draft)
+        self.discard_button.pack(side="left", padx=8)
         self.feedback_label = tk.Label(footer, textvariable=self.feedback_var, font=FONT,
                                        background=BG, foreground=MUTED, anchor="w",
                                        wraplength=440, justify="left")
-        self.feedback_label.pack(side="bottom", fill="x", pady=(8, 0))
+        self.feedback_label.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         self.window.bind("<Control-s>", lambda _event: self.save())
         self.window.bind("<Configure>", self._resize)
         self._load_selected()
@@ -148,9 +157,15 @@ class CalendarPanel:
             self.feedback_label.configure(wraplength=max(200, event.width - 42))
 
     def _mark_dirty(self, *_args) -> None:
-        if not self.loading:
+        if not self.loading and not self.journal.read_only:
             self.dirty = True
+            self._update_draft_controls()
             self.feedback_var.set("尚未保存 · 切换日期或关闭窗口时自动保存")
+
+    def _update_draft_controls(self) -> None:
+        state = "normal" if self.dirty else "disabled"
+        self.copy_draft_button.configure(state=state)
+        self.discard_button.configure(state=state)
 
     def _note_changed(self, _event=None) -> None:
         if self.note_text.edit_modified():
@@ -188,6 +203,7 @@ class CalendarPanel:
 
     def _load_selected(self) -> None:
         self.loading = True
+        self.note_text.configure(state="normal")
         item = self.journal.summary(self.selected)
         self.done_var.set(str(item["manual_done"]))
         self.stuck_var.set(str(item["manual_stuck"]))
@@ -196,7 +212,14 @@ class CalendarPanel:
         self.note_text.edit_modified(False)
         self.loading = False
         self.dirty = False
-        self.feedback_var.set(self.journal.error or "仅保存在本机；不会自动上传或发送到对话。")
+        self._update_draft_controls()
+        state = "disabled" if self.journal.read_only else "normal"
+        for widget in (self.note_text, self.done_entry, self.stuck_entry, self.save_button):
+            widget.configure(state=state)
+        self.feedback_var.set(
+            (self.journal.error or "学习记录暂不可写") + " · 编辑已停用，原文件未覆盖；修复后请重启。"
+            if self.journal.read_only else "仅保存在本机；不会自动上传或发送到对话。"
+        )
         self.refresh_stats()
         self.render_month()
 
@@ -205,9 +228,10 @@ class CalendarPanel:
             done, stuck = int(self.done_var.get()), int(self.stuck_var.get())
             self.journal.set_manual(self.selected, done, stuck, self.note_text.get("1.0", "end-1c"))
         except (ValueError, OSError) as exc:
-            self.feedback_var.set(f"未保存：{exc}")
+            self.feedback_var.set(f"未保存：{exc} · 草稿仍在，可重试、复制或放弃更改。")
             return False
         self.dirty = False
+        self._update_draft_controls()
         self.feedback_var.set("已保存在本机")
         self.refresh_stats()
         self.render_month()
@@ -231,15 +255,55 @@ class CalendarPanel:
 
     def copy_summary(self) -> None:
         if self.dirty and not self.save():
+            self.copy_draft()
             return
         self.window.clipboard_clear()
         self.window.clipboard_append(self.journal.markdown(self.selected))
         self.feedback_var.set("当日小结已复制，可手动粘贴到对话")
 
-    def hide(self) -> None:
-        if self.dirty and not self.save():
-            return
+    def copy_draft(self) -> bool:
+        draft = (
+            f"学习记录未保存草稿 · {self.selected.isoformat()}\n"
+            f"额外补记完成（输入值）：{self.done_var.get()}\n"
+            f"额外补记不会（输入值）：{self.stuck_var.get()}\n\n"
+            f"复盘 / 计划：\n{self.note_text.get('1.0', 'end-1c')}"
+        )
+        try:
+            self.window.clipboard_clear()
+            self.window.clipboard_append(draft)
+            self.window.update_idletasks()
+        except tk.TclError:
+            self.feedback_var.set("草稿复制失败，内容仍保留在窗口中。")
+            return False
+        self.feedback_var.set("未保存草稿已复制；尚未写入学习记录。")
+        return True
+
+    def discard_draft(self) -> None:
+        if self.dirty and messagebox.askyesno(
+            "放弃未保存更改", "放弃当前复盘和补记的未保存更改？已保存记录不会删除。",
+            parent=self.window,
+        ):
+            self._load_selected()
+
+    def prepare_to_close(self) -> bool:
+        if not self.dirty or self.save():
+            return True
+        choice = messagebox.askyesnocancel(
+            "更改尚未保存",
+            "当前复盘或补记未能保存。\n\n"
+            "是：复制草稿后关闭。\n否：放弃未保存更改后关闭。\n取消：保留窗口，继续修改或重试。",
+            parent=self.window, default=messagebox.CANCEL, icon=messagebox.WARNING,
+        )
+        if choice is None or (choice and not self.copy_draft()):
+            return False
+        self._load_selected()
+        return True
+
+    def hide(self) -> bool:
+        if not self.prepare_to_close():
+            return False
         self.window.withdraw()
+        return True
 
     def show(self) -> None:
         self.refresh_stats()

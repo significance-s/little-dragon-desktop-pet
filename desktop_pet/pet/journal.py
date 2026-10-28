@@ -18,7 +18,14 @@ class DailyJournal:
         self.error: str | None = None
         self.read_only = False
         self.payload: dict = {"schema_version": 1, "days": {}, "question_status": {}}
-        if path.is_file():
+        try:
+            path.stat()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            self.error = f"学习记录无法读取，原文件未改动：{exc}"
+            self.read_only = True
+        else:
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 self._validate(data)
@@ -122,9 +129,18 @@ class DailyJournal:
             raise ValueError("每日备注最多 10000 字")
         if self.read_only:
             raise OSError(self.error or "学习记录只读")
-        entry = self._day(day)
+        # Only commit edited fields in memory after the disk write succeeds.
+        # Otherwise "discard draft" could still leak failed edits into a later save.
+        key = day.isoformat()
+        entry = dict(self.payload["days"].get(key, {
+            "focus_seconds": 0, "sessions": 0, "questions": {},
+        }))
         entry.update(manual_done=done, manual_stuck=stuck, note=note)
-        self.save()
+        candidate = {**self.payload, "days": {**self.payload["days"], key: entry}}
+        _write_json_atomic(self.path, candidate)
+        self.payload = candidate
+        self.pending_seconds = 0
+        self.error = None
 
     def summary(self, day: date) -> dict:
         entry = self.payload["days"].get(day.isoformat(), {})

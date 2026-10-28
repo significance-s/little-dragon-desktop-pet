@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 STATUS_LABELS: dict[str, str] = {
@@ -118,12 +120,22 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    created = False
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            created = True
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    finally:
+        if created:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 class QuestionBankBridge:
@@ -133,29 +145,48 @@ class QuestionBankBridge:
         self.state_path = data_dir / "question_state.json"
         self.outbox_path = data_dir / "question_outbox.json"
         self.history_dir = data_dir / "returns"
-        self.data_dir.mkdir(parents=True, exist_ok=True)
         self.bank: QuestionBank | None = None
         self.last_error: str | None = None
         self._inbox_signature: tuple[int, int] | None = None
+        self.available = True
+        self._ensure_available()
+
+    def _ensure_available(self) -> bool:
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.available = False
+            self.last_error = f"答题卡数据目录暂不可用：{exc}"
+            return False
+        self.available = True
+        return True
+
+    def _require_available(self) -> None:
+        if not self.available and not self._ensure_available():
+            raise OSError(self.last_error)
 
     def load_if_changed(self) -> QuestionBank | None:
-        if not self.inbox_path.is_file():
+        if not self.available and not self._ensure_available():
             return None
-        stat = self.inbox_path.stat()
-        signature = (stat.st_mtime_ns, stat.st_size)
-        if signature == self._inbox_signature:
-            return None
-        self._inbox_signature = signature
-
         try:
+            if not self.inbox_path.is_file():
+                self.last_error = None
+                return None
+            stat = self.inbox_path.stat()
+            signature = (stat.st_mtime_ns, stat.st_size)
+            if signature == self._inbox_signature:
+                return None
             bank = QuestionBank.from_dict(_read_json(self.inbox_path))
             self._merge_saved_state(bank)
             self.bank = bank
-            self.last_error = None
             self.save_state()
+            self._inbox_signature = signature
+            self.last_error = None
             return bank
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             self.last_error = str(exc)
+            if isinstance(exc, OSError):
+                self.available = False
             return None
 
     def _merge_saved_state(self, bank: QuestionBank) -> None:
@@ -175,10 +206,19 @@ class QuestionBankBridge:
                 question.note = old.note
 
     def save_state(self) -> None:
+        self._require_available()
         if self.bank is not None:
-            _write_json_atomic(self.state_path, self.bank.to_dict())
+            try:
+                _write_json_atomic(self.state_path, self.bank.to_dict())
+            except OSError as exc:
+                self.available = False
+                self.last_error = f"答题进度未能保存：{exc}"
+                raise
+            self.available = True
+            self.last_error = None
 
     def export_result(self) -> Path:
+        self._require_available()
         bank = self.bank
         if bank is None:
             raise ValueError("当前没有题库")
@@ -189,11 +229,17 @@ class QuestionBankBridge:
         payload = bank.to_dict()
         payload["finished_at"] = finished_at
         payload["summary"] = bank.summary_counts()
-        _write_json_atomic(self.outbox_path, payload)
-
         safe_id = re.sub(r"[^0-9A-Za-z._-]+", "_", bank.set_id).strip("_") or "set"
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        _write_json_atomic(self.history_dir / f"{stamp}-{safe_id}.json", payload)
+        try:
+            _write_json_atomic(self.outbox_path, payload)
+            _write_json_atomic(self.history_dir / f"{stamp}-{safe_id}.json", payload)
+        except OSError as exc:
+            self.available = False
+            self.last_error = f"回执未能完整保存：{exc}"
+            raise
+        self.available = True
+        self.last_error = None
         return self.outbox_path
 
     def markdown_summary(self) -> str:

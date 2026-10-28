@@ -70,6 +70,7 @@ class CalendarTests(unittest.TestCase):
             window = self.panel.window
             for widget in (self.panel.note_text, self.panel.done_entry, self.panel.stuck_entry,
                            self.panel.save_button, self.panel.copy_button, self.panel.today_button,
+                           self.panel.copy_draft_button, self.panel.discard_button,
                            *self.panel.day_buttons):
                 self.assertTrue(widget.winfo_ismapped())
                 self.assertLessEqual(widget.winfo_rooty() - window.winfo_rooty()

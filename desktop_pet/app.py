@@ -76,6 +76,7 @@ def main(
     )
     pet.attach_tray(tray)
     tray.start()
+    pet.notify_storage_status()
     if bool(config.get("start_hidden", False)):
         pet.hide_to_tray()
     try:
