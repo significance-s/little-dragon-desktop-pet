@@ -1,0 +1,27 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: desktop_pet/requirements.txt
+      - name: Prepare isolated project environment
+        run: python desktop_pet/bootstrap.py --setup
+      - name: Test
+        run: .\.venv\Scripts\python.exe -m unittest discover -s desktop_pet\tests -v

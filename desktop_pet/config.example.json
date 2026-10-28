@@ -1,0 +1,13 @@
+{
+  "size": 512,
+  "opacity": 1.0,
+  "always_on_top": true,
+  "start_hidden": false,
+  "random_actions": true,
+  "random_action_min_seconds": 18,
+  "random_action_max_seconds": 35,
+  "transparent_color": "#010203",
+  "event_countdown": {
+    "enabled": false
+  }
+}

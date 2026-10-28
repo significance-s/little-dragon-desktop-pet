@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "set_id": "example-only",
+  "title": "示例推荐题单",
+  "source": "codex",
+  "created_at": "",
+  "questions": [
+    {
+      "id": "q1",
+      "title": "示例题：二分答案",
+      "prompt": "完成一道使用二分答案求最优值的问题，并写出判定函数的单调性。",
+      "difficulty": "入门",
+      "tags": ["二分", "算法"],
+      "source": "Codex 推荐"
+    },
+    {
+      "id": "q2",
+      "title": "示例题：贪心证明",
+      "prompt": "完成一道贪心题，并在备注中写出交换论证或局部最优依据。",
+      "difficulty": "基础",
+      "tags": ["贪心", "证明"],
+      "source": "Codex 推荐"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+# Local settings and personal question-card data
+/desktop_pet/config.json
+/desktop_pet/data/
+/desktop_pet/tests/runtime_data/
+
+# Python environments, caches, logs and build outputs
+__pycache__/
+*.py[cod]
+.venv/
+.venv.old/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+logs/
+*.log
+*.tmp
+.env
+.env.*
+!.env.example
+
+# Editor and OS files
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Source export and creative-process artifacts are not release inputs
+codex_pet/
+previews/
+.countdown-test-*/
